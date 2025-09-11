@@ -1,5 +1,6 @@
 import re
 from unidecode import unidecode
+from datetime import datetime
 
 card_types = {
     "visa":{
@@ -66,5 +67,4 @@ def find_cc(text):
         y = exp[1]
         m = exp[0]
     y = y if len(y)==2 else y[2:]
-    pipe =  '{}|{}|{}|{}'.format(cc[1], m, y, cvv[1])
-    return (pipe, cc[1], m, y, cvv[1])
+    return cc[1], f'0{m}'[-2:], f'{str(datetime.now().year)[:2]}{y}'[-4:], cvv[1]
