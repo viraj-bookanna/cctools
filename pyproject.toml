@@ -1,0 +1,19 @@
+[project]
+name = "cctools"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Indika Viraj", email = "sanjuvirajlive@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "unidecode>=1.4.0",
+]
+
+[project.scripts]
+cctools = "cctools:main"
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"
