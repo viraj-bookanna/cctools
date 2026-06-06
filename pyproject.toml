@@ -1,7 +1,7 @@
 [project]
 name = "cctools"
 version = "0.1.0"
-description = "Add your description here"
+description = "Credit card validation, type detection, and detail extraction utilities"
 readme = "README.md"
 authors = [
     { name = "Indika Viraj", email = "sanjuvirajlive@gmail.com" }
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cctools = "cctools:main"
+cctools = "cctools.cctools:main"
 
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]

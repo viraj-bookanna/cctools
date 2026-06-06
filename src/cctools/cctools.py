@@ -1,83 +1,190 @@
-"""cctools library"""
+"""Credit card validation, type detection, and detail extraction utilities."""
+
+from __future__ import annotations
 
 import re
+import sys
+from dataclasses import dataclass
 from datetime import datetime
+from typing import NamedTuple
 
 from unidecode import unidecode
 
-# pylint: disable=line-too-long
-_card_types = {
-    "visa": {
-        "key": "visa",
-        "name": "Visa",
-        "regex": "^4\\d{15}$",
-        "cvvMax": 999,
-        "masterpassKey": "visa",
-    },
-    "mastercard": {
-        "key": "mastercard",
-        "name": "MasterCard",
-        "regex": "^5[1-5]\\d{14}$|^2(?:2(?:2[1-9]|[3-9]\\d)|[3-6]\\d\\d|7(?:[01]\\d|20))\\d{12}$",
-        "cvvMax": 999,
-    },
-    "americanexpress": {
-        "key": "americanexpress",
-        "name": "American Express",
-        "regex": "^3[4,7]\\d{13}$",
-        "cvvMax": 9999,
-    },
-    "discovercard": {
-        "key": "discovercard",
-        "name": "Discover",
-        "regex": "^(?=6011|622(12[6-9]|1[3-9][0-9]|[2-8][0-9]{2}|9[0-1][0-9]|92[0-5]|64[4-9])|65)\\d{16}$",
-        "cvvMax": 999,
-    },
+
+@dataclass(frozen=True)
+class CardType:
+    """A recognized credit card brand with its validation pattern."""
+
+    key: str
+    name: str
+    regex: str
+    cvv_length: int
+
+
+UNKNOWN_CARD = CardType(key="unknown", name="Unknown", regex="", cvv_length=0)
+
+CARD_TYPES: dict[str, CardType] = {
+    "visa": CardType(
+        key="visa",
+        name="Visa",
+        regex=r"^4\d{15}$",
+        cvv_length=3,
+    ),
+    "mastercard": CardType(
+        key="mastercard",
+        name="MasterCard",
+        regex=r"^5[1-5]\d{14}$|^2(?:2(?:2[1-9]|[3-9]\d)|[3-6]\d\d|7(?:[01]\d|20))\d{12}$",
+        cvv_length=3,
+    ),
+    "americanexpress": CardType(
+        key="americanexpress",
+        name="American Express",
+        regex=r"^3[47]\d{13}$",
+        cvv_length=4,
+    ),
+    "discovercard": CardType(
+        key="discovercard",
+        name="Discover",
+        regex=(
+            r"^(?=6011|622(12[6-9]|1[3-9][0-9]|[2-8][0-9]{2}"
+            r"|9[0-1][0-9]|92[0-5]|64[4-9])|65)\d{16}$"
+        ),
+        cvv_length=3,
+    ),
 }
 
 
-def cc_type(card_number):
-    """get card typr by card number"""
-    for typ in _card_types.values():
-        if re.match(typ["regex"], card_number):
-            return typ
-    return {"key": "unknown", "name": "Unknown", "regex": "", "cvvMax": 0}
+def _normalize(card_number: str) -> str:
+    """Strip spaces, dashes, and dots from a card number string."""
+    return re.sub(r"[\s\-.]", "", card_number)
 
 
-def luhn(n):
-    """verify luhn checksum"""
-    r = [int(ch) for ch in str(n)][::-1]
-    return (sum(r[0::2]) + sum(sum(divmod(d * 2, 10)) for d in r[1::2])) % 10 == 0
+def cc_type(card_number: str) -> CardType:
+    """Identify the card brand by its number.
+
+    Args:
+        card_number: The credit card number (spaces/dashes are stripped
+            automatically).
+
+    Returns:
+        A ``CardType`` for the matched brand, or ``UNKNOWN_CARD``.
+    """
+    cleaned = _normalize(card_number)
+    for card in CARD_TYPES.values():
+        if re.match(card.regex, cleaned):
+            return card
+    return UNKNOWN_CARD
 
 
-def find_cc(text):
-    """find card details from an input text"""
+def luhn(n: str | int) -> bool:
+    """Validate a number using the Luhn checksum algorithm.
+
+    Args:
+        n: Card number as a string or integer.
+
+    Returns:
+        ``True`` if the checksum is valid.
+    """
+    digits = [int(ch) for ch in _normalize(str(n))][::-1]
+    checksum = sum(digits[0::2]) + sum(sum(divmod(d * 2, 10)) for d in digits[1::2])
+    return checksum % 10 == 0
+
+
+class CardDetails(NamedTuple):
+    """Parsed credit card details extracted from text."""
+
+    number: str
+    month: str  # zero-padded, e.g. "01"
+    year: str  # four-digit, e.g. "2026"
+    cvv: str
+
+
+# Matches a 15–20 digit card number surrounded by non-digit boundaries.
+_CC_PATTERN = re.compile(r"(?:^|[^0-9])(\d{15,20})(?:[^0-9]|$)")
+
+# Expiry in MM<sep>YY or YY<sep>MM or YYYY<sep>MM forms.
+_EXP_PATTERN = re.compile(
+    r"(?:^|[^0-9])"
+    r"(?:"
+    r"(?:(\d{2}|20\d{2})([^0-9a-zA-Z])\2*?(\d{2}))"
+    r"|"
+    r"(?:(\d{2})([^0-9a-zA-Z])\5*?(\d{2}|20\d{2}))"
+    r")"
+    r"(?:[^0-9]|$)"
+)
+
+# Compact expiry without a separator, e.g. "0126" or "012026".
+_EXP_COMPACT_PATTERN = re.compile(
+    r"(?:^|[^0-9])(?:(0\d|1[012])((?:20)?[23]\d))(?:[^0-9]|$)"
+)
+
+
+def find_cc(text: str) -> CardDetails | None:
+    """Extract credit card number, expiry, and CVV from free-form text.
+
+    The text is Unicode-normalized first, then scanned for a Luhn-valid
+    card number, an expiration date, and a CVV whose length matches the
+    detected card brand.
+
+    Args:
+        text: Unstructured input that may contain card details.
+
+    Returns:
+        A ``CardDetails`` named tuple, or ``None`` if extraction fails.
+    """
     text = unidecode(text)
-    cc_pattern = r"(?:^|[^0-9])(\d{15,20})(?:[^0-9]|$)"
-    cc = re.search(cc_pattern, text)
-    if not cc:
-        cc = re.search(cc_pattern, re.sub(r"\s(\d{4})", r"\1", text))
-    exp_pattern = r"(?:^|[^0-9])(?:(?:(\d{2}|20\d{2})([^0-9a-zA-Z])\2*?(\d{2}))|(?:(\d{2})([^0-9a-zA-Z])\5*?(\d{2}|20\d{2})))(?:[^0-9]|$)"
-    exp = re.search(exp_pattern, text)
-    if not exp:
-        exp = re.search(exp_pattern, text.replace(" ", ""))
-    if not exp:
-        exp_pattern2 = r"(?:^|[^0-9])(?:(0\d|1[012])((?:20)?[23]\d))(?:[^0-9]|$)"
-        exp = re.search(exp_pattern2, text)
-        if exp:
-            exp = re.search(exp_pattern, f"{exp[1]}|{exp[2]}")
-    if not cc or not exp or not luhn(cc[1]):
+
+    cc_match = _CC_PATTERN.search(text)
+    if not cc_match:
+        cc_match = _CC_PATTERN.search(re.sub(r"\s(\d{4})", r"\1", text))
+
+    exp_match = _EXP_PATTERN.search(text)
+    if not exp_match:
+        exp_match = _EXP_PATTERN.search(text.replace(" ", ""))
+    if not exp_match:
+        compact = _EXP_COMPACT_PATTERN.search(text)
+        if compact:
+            exp_match = _EXP_PATTERN.search(f"{compact[1]}|{compact[2]}")
+
+    if not cc_match or not exp_match or not luhn(cc_match[1]):
         return None
-    cvv_len = len(str(cc_type(cc[1])["cvvMax"]))
-    cvv_pattern = rf"(?:^|[^0-9])(\d{{{cvv_len}}})(?:[^0-9]|$)"
-    cvv = re.search(cvv_pattern, text)
-    if not cvv:
+
+    card = cc_type(cc_match[1])
+    cvv_pattern = re.compile(rf"(?:^|[^0-9])(\d{{{card.cvv_length}}})(?:[^0-9]|$)")
+    cvv_match = cvv_pattern.search(text)
+    if not cvv_match:
         return None
-    exp = [exp[1] if exp[1] else exp[4], exp[3] if exp[3] else exp[6]]
-    if len(exp[0]) == 4 or not (exp[0].startswith("0") or exp[0].startswith("1")):
-        y = exp[0]
-        m = exp[1]
+
+    part_a = exp_match[1] or exp_match[4]
+    part_b = exp_match[3] or exp_match[6]
+
+    if len(part_a) == 4 or not part_a.startswith(("0", "1")):
+        year_raw, month_raw = part_a, part_b
     else:
-        y = exp[1]
-        m = exp[0]
-    y = y if len(y) == 2 else y[2:]
-    return cc[1], f"0{m}"[-2:], f"{str(datetime.now().year)[:2]}{y}"[-4:], cvv[1]
+        year_raw, month_raw = part_b, part_a
+
+    month = f"0{month_raw}"[-2:]
+    century = str(datetime.now().year)[:2]
+    year = year_raw if len(year_raw) == 4 else f"{century}{year_raw}"
+
+    return CardDetails(
+        number=cc_match[1],
+        month=month,
+        year=year,
+        cvv=cvv_match[1],
+    )
+
+
+def main() -> None:
+    """CLI entry point: validate and identify a card number."""
+    if len(sys.argv) < 2:
+        print("Usage: cctools <card_number>")
+        sys.exit(1)
+
+    number = _normalize(sys.argv[1])
+    card = cc_type(number)
+    valid = luhn(number)
+
+    print(f"Number : {number}")
+    print(f"Type   : {card.name}")
+    print(f"Valid  : {'Yes' if valid else 'No'}")
